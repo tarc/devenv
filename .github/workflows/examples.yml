@@ -36,7 +36,7 @@ on:
 
 jobs:
   generate-examples:
-    runs-on: [self-hosted, linux]
+    runs-on: [ubuntu-latest]
 
     outputs:
       examples: ${{ steps.set-examples.outputs.examples }}
