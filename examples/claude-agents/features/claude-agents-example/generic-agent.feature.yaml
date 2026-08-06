@@ -12,9 +12,3 @@ components:
   TESTS:
     requirements:
       1: Simple sanity checks are performed querying directly this agent.
-
-constraints:
-  HARNESS:
-    description: Cross-cutting requirements for how this example is exercised.
-    requirements:
-      1: The example is evaluated and tested against the devenv modules in this repository.
