@@ -1,6 +1,7 @@
 # generic-agent.HARNESS.1
 # Running through the devenv shell lets devenv-run-tests point the `devenv`
-# module input at this checkout instead of the published one. The first check
-# in .test.sh asserts that it did.
+# module input at this checkout instead of the published one. The first check in
+# .test.sh asserts both that this script is running inside that shell and that
+# the input resolved to a local source in this repository.
 use_shell: true
 use_tmp_dir: false
