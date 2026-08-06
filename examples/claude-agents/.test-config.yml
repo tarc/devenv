@@ -1,2 +1,5 @@
-use_shell: false
+# proactive-agent.HARNESS.1
+# Running through the devenv shell lets devenv-run-tests point the `devenv`
+# module input at this checkout instead of the published one.
+use_shell: true
 use_tmp_dir: false
