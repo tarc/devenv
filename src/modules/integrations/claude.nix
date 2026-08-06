@@ -355,7 +355,7 @@ in
               description = "What the sub-agent does";
             };
             proactive = lib.mkOption {
-              type = lib.types.nullOr lib.types.bool;
+              type = lib.types.bool;
               default = false;
               description = "Whether Claude should use this sub-agent automatically";
             };
@@ -696,7 +696,7 @@ in
                 ---
                 name: ${name}
                 description: ${agent.description}
-                ${lib.optionalString (agent.proactive != null) "proactive: ${lib.boolToString agent.proactive}"}
+                proactive: ${lib.boolToString agent.proactive}
                 ${lib.optionalString (agent.tools != []) "tools:\n${lib.concatMapStringsSep "\n" (tool: "  - ${tool}") agent.tools}"}
                 ${lib.optionalString (agent.model != null) "model: ${agent.model}"}
                 ${lib.optionalString (agent.effort != null) "effort: ${agent.effort}"}
