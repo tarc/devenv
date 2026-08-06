@@ -58,9 +58,9 @@
             - If accepted, they will notify you and invite you to integrate the work.
             - If rejected, they will append their review findings to the existing task.md file and notify you.
           5. (IF REJECTED) Go to 2. Dispatch a new `implement` agent and invite them to respond to new action items appended to the task.md file
-          6. (IF ACCEPTED) Commit and/or merge the work. Assign the next task file (if already prepared) or invite another `prepare-task` agent to prepare more tasks.
+          6. (IF ACCEPTED) Commit and/or merge the work. Assign the next task file (if already prepared) or invite another `prepare-tasks` agent to prepare more tasks.
 
-          Repeat this process until the `prepare-task` agent tells you that the project has been completed.
+          Repeat this process until the `prepare-tasks` agent tells you that the project has been completed.
 
           You are responsible for git ops - create and integrate branches as you see fit, ideally to a central feature or impl. branch. Do not touch `main`.
 
