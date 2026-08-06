@@ -1,4 +1,4 @@
-# proactive-agent.HARNESS.1
+# generic-agent.HARNESS.1
 # Running through the devenv shell lets devenv-run-tests point the `devenv`
 # module input at this checkout instead of the published one.
 use_shell: true

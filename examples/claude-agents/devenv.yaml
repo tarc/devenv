@@ -3,6 +3,7 @@ inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
 
+  # generic-agent.HARNESS.1
   # Use the local development modules
   devenv:
     url: ../..?dir=src/modules
