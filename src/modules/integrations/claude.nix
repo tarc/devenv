@@ -713,7 +713,8 @@ in
       # Add a message about the integration
       infoSections."claude" =
         let
-          primaryAgent = lib.filterAttrs (n: a: n == cfg.agent) cfg.agents;
+          primaryAgents = lib.filterAttrs (n: a: n == cfg.agent) cfg.agents;
+          primaryAgent = if primaryAgents != { } then builtins.head (lib.attrNames primaryAgents) else cfg.agent;
           subAgents = lib.filterAttrs (n: a: n != cfg.agent) cfg.agents;
         in
         [
@@ -726,10 +727,8 @@ in
                 lib.concatStringsSep ", " (map (cmd: "/${cmd}") (lib.attrNames cfg.commands))
               }"
             }
-            ${lib.optionalString (primaryAgent != { })
-              "- Primary agent: ${
-                lib.concatStringsSep ", " (lib.attrNames primaryAgent)
-              }"
+            ${lib.optionalString (primaryAgent != null)
+              "- Primary agent: ${primaryAgent}"
             }
             ${lib.optionalString (subAgents != { })
               "- Sub-agents: ${
