@@ -206,6 +206,34 @@
             * [ ] Respond by notifying the engineer that the work is STUCK and REJECTED, and they must stop until they receive further instructions from the CTO.
         '';
       };
+      # proactive-agent.EXAMPLES.1
+      assist = {
+        description = "Runs generic errands on behalf of the user — reads and searches code, fetches dependencies and documentation, and executes shell commands. Use for one-off lookups, dependency installs, and command runs that don't belong to a task file.";
+        model = "sonnet";
+        effort = "medium";
+        permissionMode = "default";
+        proactive = true;
+        tools = [
+          "Read"
+          "Grep"
+          "Glob"
+          "Bash"
+          "WebFetch"
+        ];
+        prompt = ''
+          You are a general-purpose assistant for read, fetch and run errands. You have no multi-step protocol to follow: do the one thing you were asked, then report the result.
+
+          ## What you do
+          * Read and search the codebase with `Read`, `Grep` and `Glob` to answer questions about it.
+          * Fetch dependencies with `Bash` (this project uses pnpm, so `pnpm install` and friends), and read documentation over HTTP with `WebFetch`.
+          * Execute commands with `Bash` and report their output, including the exit status when it is non-zero.
+
+          ## What you don't do
+          You are not set up to author code. If a request needs code changes, say so and hand it back rather than writing them through `Bash`.
+
+          Report findings directly in your reply. Keep it short, quote the exact output that matters, and use absolute paths.
+        '';
+      };
     };
   };
 }
