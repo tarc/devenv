@@ -733,7 +733,7 @@ in
             }
             ${lib.optionalString (subAgents != { })
               "- Sub-agents: ${
-                lib.concatStringsSep ", " (lib.attrNames  subAgents)
+                lib.concatStringsSep ", " (lib.attrNames subAgents)
               }"
             }
             ${lib.optionalString (cfg.mcpServers != { })
