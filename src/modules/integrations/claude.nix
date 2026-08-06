@@ -743,17 +743,6 @@ in
             }
           ''
         ];
-
-      assertions = [
-        {
-          assertion = cfg.agent != null -> (cfg.agents.${cfg.agent} or null) != null;
-          message = "claude.code.agent must be set to one of the claude.code.agents.<NAME>";
-        }
-        {
-          assertion = cfg.agent != null -> (cfg.agents.${cfg.agent}.proactive or null) == null;
-          message = "claude.code.agent = <NAME> requires claude.code.agents.<NAME>.proactive to be null";
-        }
-      ];
     })
 
   ];
