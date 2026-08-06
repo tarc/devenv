@@ -2,16 +2,19 @@
 
 set -euo pipefail
 
-# proactive-agent.HARNESS.1
-# Already running inside the devenv shell; nesting another `devenv shell` here
-# would discard the module input the test harness set up.
+# generic-agent.HARNESS.1
+# This script already runs inside the devenv shell the harness set up, which is
+# what points the `devenv` module input at this checkout. Nesting another
+# `devenv shell` anywhere below would discard that input and evaluate the
+# example against the published modules instead.
+
 acai skill --install
 
-# proactive-agent.TESTS.1
+# generic-agent.TESTS.1
 # The agent, in devenv terms, is the definition the claude module generates.
 # These checks query that definition directly; they never call out to Claude,
 # so they need no credentials and stay deterministic in CI.
-ACID="proactive-agent.TESTS.1"
+ACID="generic-agent.TESTS.1"
 AGENT="assist"
 AGENTS_DIR=".claude/agents"
 SETTINGS=".claude/settings.json"
@@ -48,15 +51,7 @@ if [ ! -e "$agent_file" ]; then
 fi
 pass "agent '$AGENT' is registered at $agent_file"
 
-# 2. It declares itself proactive.
-if ! frontmatter_has "$agent_file" "proactive: true"; then
-  echo "Frontmatter of $agent_file:" >&2
-  frontmatter "$agent_file" >&2
-  fail "agent '$AGENT' does not declare 'proactive: true'"
-fi
-pass "agent '$AGENT' declares 'proactive: true'"
-
-# 3. It is not the primary agent.
+# 2. It is not the primary agent.
 if [ ! -e "$SETTINGS" ]; then
   fail "$SETTINGS does not exist"
 fi
@@ -76,7 +71,7 @@ if [ "$primary" != "supervise" ]; then
 fi
 pass "agent '$AGENT' is not primary; the primary agent is '$primary'"
 
-# 4. It is distinct from the four workflow agents, which are all still intact.
+# 3. It is distinct from the four workflow agents, which are all still intact.
 for workflow_agent in "${WORKFLOW_AGENTS[@]}"; do
   if [ "$AGENT" = "$workflow_agent" ]; then
     fail "agent '$AGENT' must not be one of the workflow agents"
@@ -89,25 +84,22 @@ for workflow_agent in "${WORKFLOW_AGENTS[@]}"; do
   if ! frontmatter_has "$workflow_file" "name: $workflow_agent"; then
     fail "workflow agent '$workflow_agent' no longer declares 'name: $workflow_agent'"
   fi
-  if frontmatter_has "$workflow_file" "proactive: true"; then
-    fail "workflow agent '$workflow_agent' became proactive, only '$AGENT' should be"
-  fi
 done
-pass "agent '$AGENT' is distinct from ${WORKFLOW_AGENTS[*]}, which are all still present and non-proactive"
+pass "agent '$AGENT' is distinct from ${WORKFLOW_AGENTS[*]}, which are all still present"
 
-# 5. Its tools grant the capabilities of proactive-agent.EXAMPLES.1.
+# 4. Its tools grant the capabilities of generic-agent.EXAMPLES.1.
 for tool in Read Grep Glob Bash WebFetch; do
   if ! frontmatter_has "$agent_file" "  - $tool"; then
     echo "Frontmatter of $agent_file:" >&2
     frontmatter "$agent_file" >&2
-    fail "proactive-agent.EXAMPLES.1: agent '$AGENT' is not granted the '$tool' tool"
+    fail "generic-agent.EXAMPLES.1: agent '$AGENT' is not granted the '$tool' tool"
   fi
 done
 for tool in Write Edit; do
   if frontmatter_has "$agent_file" "  - $tool"; then
-    fail "proactive-agent.EXAMPLES.1: agent '$AGENT' is granted the authoring tool '$tool', which belongs to the 'implement' agent"
+    fail "generic-agent.EXAMPLES.1: agent '$AGENT' is granted the authoring tool '$tool', which belongs to the 'implement' agent"
   fi
 done
-pass "proactive-agent.EXAMPLES.1: agent '$AGENT' is granted Read, Grep, Glob, Bash and WebFetch, and no authoring tools"
+pass "generic-agent.EXAMPLES.1: agent '$AGENT' is granted Read, Grep, Glob, Bash and WebFetch, and no authoring tools"
 
 echo "=== $ACID: all checks passed ==="

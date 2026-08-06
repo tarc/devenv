@@ -203,7 +203,7 @@
             * [ ] Respond by notifying the engineer that the work is STUCK and REJECTED, and they must stop until they receive further instructions from the CTO.
         '';
       };
-      # proactive-agent.EXAMPLES.1
+      # generic-agent.EXAMPLES.1
       assist = {
         description = "Runs generic errands on behalf of the user — reads and searches code, fetches dependencies and documentation, and executes shell commands. Use for one-off lookups, dependency installs, and command runs that don't belong to a task file.";
         model = "sonnet";
