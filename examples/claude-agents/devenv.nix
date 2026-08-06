@@ -40,7 +40,6 @@
         ];
         permissionMode = "acceptEdits";
         effort = "low";
-        proactive = null;
         prompt = ''
           You are a Project Supervisor. Your job is to coordinate handoff between agents. We work with the `prepare-tasks` agent, the `implement` agent, and the `review-task` agents.
 
@@ -88,7 +87,6 @@
         description = "Researches the codebase and prepares comprehensive, timestamped task files for sequential developer implementation. Use to plan the next batch of work, break a feature into phases, or when told a project needs task assignments prepared.";
         model = "opus";
         effort = "high";
-        proactive = null;
         tools = [
           "Read"
           "Grep"
@@ -138,7 +136,6 @@
           "Bash"
           "WebFetch"
         ];
-        proactive = null;
         prompt = ''
           You are a Developer who has been dispatched to implement code and complete a task, or respond to feedback on previous work.
 
