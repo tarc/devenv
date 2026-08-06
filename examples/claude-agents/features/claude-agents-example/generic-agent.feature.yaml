@@ -2,7 +2,7 @@ feature:
   name: generic-agent
   product: claude-agents-example
   description: >
-    An agent that is not a primary one and also none of the `supervise`, `prepare-task`, `implement` or `review-task` agents.
+    An agent that is not a primary one and also none of the `supervise`, `prepare-tasks`, `implement` or `review-task` agents.
 
 components:
   EXAMPLES:
