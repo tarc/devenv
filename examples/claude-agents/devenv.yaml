@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=./docs/src/devenv.schema.json
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+
+  # Use the local development modules
+  devenv:
+    url: ../..?dir=src/modules
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
