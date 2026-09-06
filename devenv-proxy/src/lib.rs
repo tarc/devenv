@@ -1,22 +1,25 @@
 //! Shared HTTP reverse proxy for friendly devenv `.localhost` URLs.
 
+mod certificates;
 mod control;
 mod routes;
 
-#[cfg(all(feature = "server", target_os = "macos"))]
-use anyhow::Context;
 #[cfg(feature = "server")]
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(feature = "server")]
 use async_trait::async_trait;
 #[cfg(feature = "server")]
 use bytes::Bytes;
+pub use certificates::TlsConfig;
 #[cfg(feature = "server")]
 pub use control::serve_control;
 pub use control::{ControlRequest, ControlResponse, request};
 #[cfg(feature = "server")]
+use pingora_core::tls::{ext, ssl::NameType};
+#[cfg(feature = "server")]
 use pingora_core::{
-    listeners::ConnectionFilter,
+    listeners::{ConnectionFilter, TlsAccept, tls::TlsSettings},
+    protocols::tls::TlsRef,
     server::{Server, configuration::ServerConf},
     upstreams::peer::HttpPeer,
 };
@@ -45,6 +48,33 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(feature = "server")]
 struct Router {
     routes: RouteTable,
+}
+
+#[cfg(feature = "server")]
+struct Certificates(RouteTable);
+
+#[cfg(feature = "server")]
+#[async_trait]
+impl TlsAccept for Certificates {
+    async fn certificate_callback(&self, ssl: &mut TlsRef) {
+        let Some(certificate) = ssl
+            .servername(NameType::HOST_NAME)
+            .and_then(|hostname| self.0.certificate(hostname))
+        else {
+            return;
+        };
+        let mut install = || -> Result<()> {
+            ext::ssl_use_certificate(ssl, certificate.leaf())?;
+            ext::ssl_use_private_key(ssl, &certificate.key)?;
+            for certificate in certificate.chain.iter().skip(1) {
+                ext::ssl_add_chain_cert(ssl, certificate)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = install() {
+            eprintln!("failed to install proxy TLS certificate: {error:#}");
+        }
+    }
 }
 
 #[cfg(feature = "server")]
@@ -165,7 +195,16 @@ impl ProxyHttp for Router {
         if let Some(host) = request_host(session) {
             upstream_request.insert_header("x-forwarded-host", host)?;
         }
-        upstream_request.insert_header("x-forwarded-proto", "http")?;
+        let scheme = if session
+            .as_downstream()
+            .digest()
+            .is_some_and(|digest| digest.ssl_digest.is_some())
+        {
+            "https"
+        } else {
+            "http"
+        };
+        upstream_request.insert_header("x-forwarded-proto", scheme)?;
         if let Some(client) = session
             .as_downstream()
             .client_addr()
@@ -223,7 +262,17 @@ pub fn default_control_socket() -> PathBuf {
 /// is local-only and uses a mode-0600 Unix socket.
 #[cfg(all(feature = "server", unix))]
 pub fn run(listen: SocketAddr, control_socket: &Path) -> Result<()> {
-    let routes = RouteTable::default();
+    run_with_https(listen, None, control_socket)
+}
+
+#[cfg(all(feature = "server", unix))]
+pub fn run_with_https(
+    listen: SocketAddr,
+    https_listen: Option<SocketAddr>,
+    control_socket: &Path,
+) -> Result<()> {
+    let mut routes = RouteTable::default();
+    routes.https_listen = https_listen;
     let _control = serve_control(control_socket, routes.clone())?;
 
     // Pingora defaults to a five-minute drain on SIGTERM. Keep local daemon
@@ -238,24 +287,36 @@ pub fn run(listen: SocketAddr, control_socket: &Path) -> Result<()> {
     );
     server.bootstrap();
 
+    let certificates = Certificates(routes.clone());
     let mut service = http_proxy_service(&server.configuration, Router { routes });
     service.set_connection_filter(Arc::new(LoopbackOnly));
 
     #[cfg(target_os = "macos")]
-    if let Some(prebound) = prebind_macos_low_port(listen)? {
-        service.add_tcp(&prebound.bind);
-        server.add_service(PreboundService {
-            inner: service,
-            prebound: Some(prebound),
-        });
-    } else {
-        service.add_tcp(&listen.to_string());
-        server.add_service(service);
+    let mut prebound = Vec::new();
+    #[cfg(target_os = "macos")]
+    let http_bind = listener_bind(listen, &mut prebound)?;
+    #[cfg(not(target_os = "macos"))]
+    let http_bind = listen.to_string();
+    service.add_tcp(&http_bind);
+
+    if let Some(listen) = https_listen {
+        let settings = TlsSettings::with_callbacks(Box::new(certificates))
+            .context("failed to configure proxy TLS")?;
+        #[cfg(target_os = "macos")]
+        let bind = listener_bind(listen, &mut prebound)?;
+        #[cfg(not(target_os = "macos"))]
+        let bind = listen.to_string();
+        service.add_tls_with_settings(&bind, None, settings);
     }
+
+    #[cfg(target_os = "macos")]
+    server.add_service(PreboundService {
+        inner: service,
+        prebound,
+    });
 
     #[cfg(not(target_os = "macos"))]
     {
-        service.add_tcp(&listen.to_string());
         server.add_service(service);
     }
     server.run_forever();
@@ -265,6 +326,17 @@ pub fn run(listen: SocketAddr, control_socket: &Path) -> Result<()> {
 struct PreboundListener {
     bind: String,
     socket: socket2::Socket,
+}
+
+#[cfg(all(feature = "server", target_os = "macos"))]
+fn listener_bind(listen: SocketAddr, prebound: &mut Vec<PreboundListener>) -> Result<String> {
+    if let Some(listener) = prebind_macos_low_port(listen)? {
+        let bind = listener.bind.clone();
+        prebound.push(listener);
+        Ok(bind)
+    } else {
+        Ok(listen.to_string())
+    }
 }
 
 /// Bind a low port without privilege by using Darwin's wildcard exception,
@@ -323,7 +395,7 @@ fn prebind_macos_low_port(listen: SocketAddr) -> Result<Option<PreboundListener>
 #[cfg(all(feature = "server", target_os = "macos"))]
 struct PreboundService<A> {
     inner: pingora_core::services::listening::Service<A>,
-    prebound: Option<PreboundListener>,
+    prebound: Vec<PreboundListener>,
 }
 
 #[cfg(all(feature = "server", target_os = "macos"))]
@@ -340,7 +412,7 @@ where
         ready: pingora_core::services::ServiceReadyNotifier,
     ) {
         let fds = fds.expect("Pingora provides an inherited listener table on Unix");
-        if let Some(prebound) = self.prebound.take() {
+        for prebound in self.prebound.drain(..) {
             fds.lock()
                 .await
                 .add(prebound.bind, prebound.socket.into_raw_fd());

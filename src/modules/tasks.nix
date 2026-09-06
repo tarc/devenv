@@ -273,6 +273,7 @@ let
                       default = { };
                       description = "Full `.localhost` proxy hostnames keyed by port name.";
                     };
+                    options.https.enable = lib.mkEnableOption "HTTPS proxy URLs for this process";
                   };
                   default = { };
                   internal = true;

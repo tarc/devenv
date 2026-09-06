@@ -116,6 +116,10 @@ let
             '';
             example = "app.localhost";
           };
+          options.https.enable = lib.mkEnableOption ''
+            HTTPS proxy URLs for this process using the project's mkcert certificate authority.
+            HTTP URLs remain available. Requires `process.proxy.enable`
+          '';
         };
         default = { };
         description = "Shared HTTP proxy configuration for this process.";

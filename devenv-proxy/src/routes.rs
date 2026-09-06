@@ -1,3 +1,6 @@
+use crate::TlsConfig;
+#[cfg(feature = "server")]
+use crate::certificates::Certificate;
 use anyhow::{Result, bail};
 #[cfg(feature = "server")]
 use arc_swap::ArcSwap;
@@ -14,18 +17,20 @@ pub struct Route {
     pub hostname: String,
     pub upstream: SocketAddr,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 #[cfg(feature = "server")]
-pub struct RouteTable {
-    routes: Arc<ArcSwap<BTreeMap<String, Route>>>,
-    updates: Arc<Mutex<()>>,
+struct RegisteredRoute {
+    route: Route,
+    certificate: Option<Arc<Certificate>>,
 }
 
 #[cfg(feature = "server")]
-impl RouteTable {
-    pub fn register(&self, mut route: Route) -> Result<()> {
+impl RegisteredRoute {
+    fn new(mut route: Route) -> Result<Self> {
         route.hostname = normalize_hostname(&route.hostname)?;
         if route.owner.trim().is_empty() {
             bail!("route owner cannot be empty");
@@ -33,6 +38,33 @@ impl RouteTable {
         if !route.upstream.ip().is_loopback() {
             bail!("route upstream must use a loopback address");
         }
+        let certificate = route.tls.as_ref().map(Certificate::load).transpose()?;
+        if certificate
+            .as_ref()
+            .is_some_and(|certificate| !certificate.covers(&route.hostname))
+        {
+            bail!("proxy certificate does not cover {}", route.hostname);
+        }
+        Ok(Self {
+            route,
+            certificate: certificate.map(Arc::new),
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+#[cfg(feature = "server")]
+pub struct RouteTable {
+    routes: Arc<ArcSwap<BTreeMap<String, RegisteredRoute>>>,
+    updates: Arc<Mutex<()>>,
+    pub(crate) https_listen: Option<SocketAddr>,
+}
+
+#[cfg(feature = "server")]
+impl RouteTable {
+    pub fn register(&self, route: Route) -> Result<()> {
+        let registered = RegisteredRoute::new(route)?;
+        let route = &registered.route;
 
         let _update = self
             .updates
@@ -41,7 +73,7 @@ impl RouteTable {
         let current = self.routes.load();
         if current
             .get(&route.hostname)
-            .is_some_and(|existing| existing.owner != route.owner)
+            .is_some_and(|existing| existing.route.owner != route.owner)
         {
             bail!(
                 "hostname {} is already owned by another project",
@@ -49,7 +81,7 @@ impl RouteTable {
             );
         }
         let mut next = (**current).clone();
-        next.insert(route.hostname.clone(), route);
+        next.insert(route.hostname.clone(), registered);
         self.routes.store(Arc::new(next));
         Ok(())
     }
@@ -64,7 +96,7 @@ impl RouteTable {
         let Some(existing) = current.get(&hostname) else {
             return Ok(false);
         };
-        if existing.owner != owner {
+        if existing.route.owner != owner {
             bail!("hostname {hostname} is owned by another project");
         }
         let mut next = (**current).clone();
@@ -84,15 +116,15 @@ impl RouteTable {
         }
 
         let mut replacement = BTreeMap::new();
-        for mut route in routes {
+        for route in routes {
             if route.owner != owner {
                 bail!("replacement route has a different owner");
             }
-            route.hostname = normalize_hostname(&route.hostname)?;
-            if !route.upstream.ip().is_loopback() {
-                bail!("route upstream must use a loopback address");
-            }
-            if replacement.insert(route.hostname.clone(), route).is_some() {
+            let registered = RegisteredRoute::new(route)?;
+            if replacement
+                .insert(registered.route.hostname.clone(), registered)
+                .is_some()
+            {
                 bail!("replacement contains a duplicate hostname");
             }
         }
@@ -105,14 +137,14 @@ impl RouteTable {
         for hostname in replacement.keys() {
             if current
                 .get(hostname)
-                .is_some_and(|existing| existing.owner != owner)
+                .is_some_and(|existing| existing.route.owner != owner)
             {
                 bail!("hostname {hostname} is already owned by another project");
             }
         }
 
         let mut next = (**current).clone();
-        next.retain(|_, route| route.owner != owner);
+        next.retain(|_, route| route.route.owner != owner);
         next.extend(replacement);
         self.routes.store(Arc::new(next));
         Ok(())
@@ -123,11 +155,20 @@ impl RouteTable {
         self.routes
             .load()
             .get(&hostname)
-            .map(|route| route.upstream)
+            .map(|route| route.route.upstream)
     }
 
     pub fn list(&self) -> Vec<Route> {
-        self.routes.load().values().cloned().collect()
+        self.routes
+            .load()
+            .values()
+            .map(|route| route.route.clone())
+            .collect()
+    }
+
+    pub(crate) fn certificate(&self, hostname: &str) -> Option<Arc<Certificate>> {
+        let hostname = normalize_hostname(hostname).ok()?;
+        self.routes.load().get(&hostname)?.certificate.clone()
     }
 }
 
@@ -160,6 +201,7 @@ mod tests {
             hostname: hostname.to_owned(),
             upstream: SocketAddr::from(([127, 0, 0, 1], port)),
             owner: owner.to_owned(),
+            tls: None,
         }
     }
 

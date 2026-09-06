@@ -53,15 +53,12 @@ The default timeout is 120 seconds.
 
 ## Friendly localhost URLs
 
-Enable the shared HTTP proxy to expose processes with named ports under
-`.localhost`:
+Processes with named ports get HTTP URLs under `.localhost` by default:
 
 ```nix title="devenv.nix"
 { config, ... }:
 
 {
-  process.proxy.enable = true;
-
   processes.web = {
     exec = "python -m http.server $PORT";
     ports.http.allocate = 8000;
@@ -71,7 +68,8 @@ Enable the shared HTTP proxy to expose processes with named ports under
 ```
 
 By default, the process is available at
-`http://web.<project-name>.localhost`. Override that hostname for an individual
+`http://web.<project-name>.localhost`. Set `process.proxy.enable = false` to
+disable proxying for the project. Override that hostname for an individual
 process with a full `.localhost` hostname:
 
 ```nix title="devenv.nix"
@@ -96,6 +94,32 @@ hostname independently:
 
 Port-level hostnames take precedence over the process hostname. Ports without
 an override continue to use the process hostname as their base.
+
+### HTTPS
+
+:::tip[New in devenv 2.3]
+:::
+
+Enable HTTPS for an individual process's generated URLs:
+
+```nix title="devenv.nix"
+{
+  processes.web.proxy.https.enable = true;
+}
+```
+
+HTTPS is disabled by default. `devenv up` uses the project's existing mkcert
+certificate authority, generates certificates for the opted-in process hostnames,
+and shows their `https://` URLs in the TUI. Other processes keep their HTTP URLs.
+The first setup may request permission to trust
+the local certificate authority. If trust installation fails, run `mkcert -install`
+inside the development shell.
+
+The shared proxy serves HTTPS on port 443 and continues to serve HTTP on port 80.
+Processes continue to receive HTTP, with `X-Forwarded-Proto: https` for HTTPS
+requests. Each project keeps its own certificates; the shared proxy selects the
+certificate for the requested hostname. Restart an existing HTTP-only proxy when
+first enabling HTTPS.
 
 ## Linux capabilities
 

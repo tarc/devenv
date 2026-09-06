@@ -2,7 +2,7 @@
 
 use crate::tasks;
 use devenv_mailbox::FrontendCommand;
-use devenv_proxy::{ControlRequest, ControlResponse, Route};
+use devenv_proxy::{ControlRequest, ControlResponse, Route, TlsConfig};
 use miette::{IntoDiagnostic, Result, WrapErr, bail, miette};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -16,6 +16,175 @@ use std::{
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_PROJECT_NAME: &str = "devenv-shell";
+
+pub(crate) async fn prepare_https(
+    routes: &mut [Route],
+    task_configs: &mut [tasks::TaskConfig],
+    envs: &HashMap<String, String>,
+    frontend: Option<&tokio::sync::mpsc::Sender<FrontendCommand>>,
+) -> Result<()> {
+    let tls_routes = https_routes(routes, task_configs);
+    if tls_routes.is_empty() {
+        return Ok(());
+    }
+    let ca_dir = envs
+        .get("CAROOT")
+        .map(PathBuf::from)
+        .ok_or_else(|| miette!("HTTPS requires the project's mkcert CAROOT"))?;
+    let mkcert = envs
+        .get("DEVENV_MKCERT")
+        .ok_or_else(|| miette!("HTTPS requires the Nix-provided mkcert executable"))?;
+    let command = || {
+        let mut command = Command::new(mkcert);
+        command.envs(envs).env("CAROOT", &ca_dir);
+        command
+    };
+    fs::create_dir_all(&ca_dir).into_diagnostic()?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(ca_dir.join("proxy.lock"))
+        .into_diagnostic()?;
+    lock.lock()
+        .into_diagnostic()
+        .wrap_err("failed to lock proxy certificate setup")?;
+    if !ca_dir.join("rootCA.pem").exists() {
+        let mut install = command();
+        install.arg("-install");
+        let status = run_certificate_install(&mut install, frontend).await?;
+        if !status.success() {
+            devenv_activity::message(
+                devenv_activity::ActivityLevel::Warn,
+                "mkcert could not install the local CA into trust stores; run `mkcert -install` in the development shell to trust HTTPS URLs",
+            );
+        }
+        if !ca_dir.join("rootCA.pem").exists() {
+            bail!(
+                "mkcert failed to create the local certificate authority in {}",
+                ca_dir.display()
+            );
+        }
+    }
+
+    let directory = ca_dir.join("proxy");
+    fs::create_dir_all(&directory).into_diagnostic()?;
+    let tls = TlsConfig {
+        certificate: directory.join("cert.pem"),
+        key: directory.join("key.pem"),
+    };
+    let mut hostnames: Vec<_> = tls_routes
+        .iter()
+        .map(|route| route.hostname.clone())
+        .collect();
+    hostnames.sort();
+    hostnames.dedup();
+    if !tls.is_current(&hostnames, &ca_dir.join("rootCA.pem")) {
+        devenv_activity::message(
+            devenv_activity::ActivityLevel::Info,
+            "generating certificates for HTTPS process URLs",
+        );
+        // Generate a complete pair before replacing the files used by the proxy.
+        let temporary = tempfile::tempdir_in(&directory).into_diagnostic()?;
+        let certificate = temporary.path().join("cert.pem");
+        let key = temporary.path().join("key.pem");
+        let output = command()
+            .arg("-cert-file")
+            .arg(&certificate)
+            .arg("-key-file")
+            .arg(&key)
+            .args(&hostnames)
+            .stdin(Stdio::null())
+            .output()
+            .into_diagnostic()
+            .wrap_err("failed to run mkcert for proxy hostnames")?;
+        if !output.status.success() {
+            bail!(
+                "mkcert failed to generate proxy certificates: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        fs::rename(certificate, &tls.certificate).into_diagnostic()?;
+        fs::rename(key, &tls.key).into_diagnostic()?;
+    }
+    for route in tls_routes {
+        route.tls = Some(tls.clone());
+    }
+    update_proxy_urls(routes, task_configs);
+    Ok(())
+}
+
+fn update_proxy_urls(routes: &[Route], task_configs: &mut [tasks::TaskConfig]) {
+    // Keep displayed URLs derived from the actual registered routes.
+    let urls: HashMap<_, _> = routes
+        .iter()
+        .map(|route| {
+            let mut http = route.clone();
+            http.tls = None;
+            (route_url(&http), route_url(route))
+        })
+        .collect();
+    for task in task_configs {
+        if let Some(process) = &mut task.process {
+            for url in &mut process.proxy.urls {
+                if let Some(https) = urls.get(url) {
+                    *url = https.clone();
+                }
+            }
+        }
+    }
+}
+
+fn https_routes<'a>(
+    routes: &'a mut [Route],
+    task_configs: &[tasks::TaskConfig],
+) -> Vec<&'a mut Route> {
+    let urls: HashSet<_> = task_configs
+        .iter()
+        .filter_map(|task| task.process.as_ref())
+        .filter(|process| process.proxy.https.enable)
+        .flat_map(|process| process.proxy.urls.iter().map(String::as_str))
+        .collect();
+    routes
+        .iter_mut()
+        .filter(|route| urls.contains(route_url(route).as_str()))
+        .collect()
+}
+
+async fn run_certificate_install(
+    command: &mut Command,
+    frontend: Option<&tokio::sync::mpsc::Sender<FrontendCommand>>,
+) -> Result<std::process::ExitStatus> {
+    let mut resume = None;
+    if let Some(frontend) = frontend {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        frontend
+            .send(FrontendCommand::PauseForInteraction {
+                ready: ready_tx,
+                resume: resume_rx,
+            })
+            .await
+            .map_err(|_| {
+                miette!("terminal frontend stopped before certificate trust installation")
+            })?;
+        tokio::task::spawn_blocking(move || ready_rx.recv())
+            .await
+            .into_diagnostic()?
+            .map_err(|_| {
+                miette!("terminal frontend stopped before certificate trust installation")
+            })?;
+        resume = Some(resume_tx);
+    }
+    let result = command
+        .status()
+        .into_diagnostic()
+        .wrap_err("failed to install the local certificate authority");
+    if let Some(resume) = resume {
+        let _ = resume.send(());
+    }
+    result
+}
 
 pub(crate) fn project_name(configured: Option<String>, root: &Path) -> Result<String> {
     configured
@@ -104,13 +273,16 @@ pub(crate) fn project_routes(
 }
 
 fn route_url(route: &Route) -> String {
-    let port = proxy_listen_address()
-        .map(|address| address.port())
-        .unwrap_or(80);
-    if port == 80 {
-        format!("http://{}", route.hostname)
+    let (scheme, default_port, listen) = if route.tls.is_some() {
+        ("https", 443, proxy_https_listen_address())
     } else {
-        format!("http://{}:{port}", route.hostname)
+        ("http", 80, proxy_listen_address())
+    };
+    let port = listen.map(|address| address.port()).unwrap_or(default_port);
+    if port == default_port {
+        format!("{scheme}://{}", route.hostname)
+    } else {
+        format!("{scheme}://{}:{port}", route.hostname)
     }
 }
 
@@ -147,6 +319,7 @@ fn push_route(
         hostname,
         upstream: SocketAddr::from(([127, 0, 0, 1], port)),
         owner: owner.to_owned(),
+        tls: None,
     });
     Ok(())
 }
@@ -186,7 +359,7 @@ pub(crate) async fn reconcile(
         return Ok(());
     }
 
-    ensure_running(frontend).await?;
+    ensure_running(frontend, routes.iter().any(|route| route.tls.is_some())).await?;
     replace_owner(owner, routes.clone())?;
     for route in routes {
         devenv_activity::message(
@@ -218,6 +391,7 @@ fn replace_owner(owner: &str, routes: Vec<Route>) -> Result<()> {
 
 async fn ensure_running(
     frontend: Option<&tokio::sync::mpsc::Sender<FrontendCommand>>,
+    https: bool,
 ) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let _ = frontend;
@@ -225,7 +399,24 @@ async fn ensure_running(
     let socket = devenv_proxy::default_control_socket();
     let listen = proxy_listen_address()
         .ok_or_else(|| miette!("DEVENV_PROXY_LISTEN is not a valid socket address"))?;
+    let https_listen = https
+        .then(|| {
+            proxy_https_listen_address()
+                .ok_or_else(|| miette!("DEVENV_PROXY_HTTPS_LISTEN is not a valid socket address"))
+        })
+        .transpose()?;
     if wait_for_existing_proxy(&socket, listen).await? {
+        if let Some(expected) = https_listen {
+            match devenv_proxy::request(&socket, &ControlRequest::Status) {
+                Ok(ControlResponse::Info {
+                    https_listen: Some(actual),
+                    ..
+                }) if actual == expected => {}
+                _ => bail!(
+                    "the running devenv-proxy has no HTTPS listener at {expected}; restart the shared proxy and run `devenv up` again"
+                ),
+            }
+        }
         return Ok(());
     }
 
@@ -243,7 +434,7 @@ async fn ensure_running(
         .open(&log_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to open {}", log_path.display()))?;
-    let args = vec![
+    let mut args = vec![
         "--listen".to_owned(),
         listen.to_string(),
         "--control-socket".to_owned(),
@@ -252,9 +443,15 @@ async fn ensure_running(
             .ok_or_else(|| miette!("proxy control socket path is not valid UTF-8"))?
             .to_owned(),
     ];
+    if let Some(listen) = https_listen {
+        args.extend(["--https-listen".to_owned(), listen.to_string()]);
+    }
 
     #[cfg(target_os = "linux")]
-    let detached_pid = if listen.port() < 1024 && !nix::unistd::geteuid().is_root() {
+    let detached_pid = if (listen.port() < 1024
+        || https_listen.is_some_and(|listen| listen.port() < 1024))
+        && !nix::unistd::geteuid().is_root()
+    {
         let program = executable
             .to_str()
             .ok_or_else(|| miette!("proxy executable path is not valid UTF-8"))?;
@@ -350,8 +547,14 @@ async fn ensure_running(
 
 #[cfg(target_os = "linux")]
 fn linux_process_running(pid: u32) -> bool {
-    i32::try_from(pid)
-        .is_ok_and(|pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok())
+    i32::try_from(pid).is_ok_and(|pid| {
+        // The broker reports the PID before its child drops root privileges.
+        // EPERM means the child exists but we cannot signal it yet.
+        matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Ok(()) | Err(nix::errno::Errno::EPERM)
+        )
+    })
 }
 
 fn proxy_ready(socket: &Path) -> bool {
@@ -418,6 +621,13 @@ fn proxy_listen_address() -> Option<SocketAddr> {
         .ok()
 }
 
+fn proxy_https_listen_address() -> Option<SocketAddr> {
+    std::env::var("DEVENV_PROXY_HTTPS_LISTEN")
+        .unwrap_or_else(|_| "127.0.0.1:443".to_owned())
+        .parse()
+        .ok()
+}
+
 fn proxy_executable() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("DEVENV_PROXY_BINARY") {
         return Ok(PathBuf::from(path));
@@ -450,6 +660,172 @@ fn proxy_log_path(socket: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use devenv_processes::{ProcessConfig, ProcessProxyConfig};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_process_is_not_mistaken_for_an_exited_daemon() {
+        // PID 1 exists, but an unprivileged caller cannot signal the root-owned
+        // init process. This is also true of the broker child before setresuid.
+        assert!(linux_process_running(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exited_daemon_is_not_running() {
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!linux_process_running(pid));
+        assert!(!linux_process_running(u32::MAX));
+    }
+
+    #[tokio::test]
+    async fn certificate_trust_requires_frontend_handoff() {
+        let (frontend, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let error = run_certificate_install(&mut Command::new("must-not-run"), Some(&frontend))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("terminal frontend stopped before certificate trust installation")
+        );
+    }
+
+    #[test]
+    fn certificate_routes_use_https_urls() {
+        let route = Route {
+            hostname: "docs.demo.localhost".to_owned(),
+            upstream: "127.0.0.1:4321".parse().unwrap(),
+            owner: "demo".to_owned(),
+            tls: Some(TlsConfig {
+                certificate: "/work/.devenv/state/mkcert/proxy/cert.pem".into(),
+                key: "/work/.devenv/state/mkcert/proxy/key.pem".into(),
+            }),
+        };
+        let decoded: Route = serde_json::from_str(&serde_json::to_string(&route).unwrap()).unwrap();
+        assert_eq!(route, decoded);
+        let port = proxy_https_listen_address().unwrap().port();
+        let expected = if port == 443 {
+            "https://docs.demo.localhost".to_owned()
+        } else {
+            format!("https://docs.demo.localhost:{port}")
+        };
+        assert_eq!(route_url(&decoded), expected);
+    }
+
+    #[tokio::test]
+    async fn http_processes_do_not_require_certificate_setup() {
+        let mut tasks = vec![process_task("web", &[("http", 8080)])];
+        let mut routes = project_routes("demo", "test", &mut tasks).unwrap();
+        prepare_https(&mut routes, &mut tasks, &HashMap::new(), None)
+            .await
+            .unwrap();
+        assert!(routes.iter().all(|route| route.tls.is_none()));
+        assert_eq!(
+            tasks[0].process.as_ref().unwrap().proxy.urls,
+            [route_url(&routes[0])]
+        );
+        assert!(route_url(&routes[0]).starts_with("http://"));
+    }
+
+    #[tokio::test]
+    async fn https_uses_the_configured_mkcert_without_path_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mkcert = directory.path().join("configured-mkcert");
+        fs::write(
+            &mkcert,
+            "#!/bin/sh\nprintf 'configured mkcert invoked' >&2\nexit 23\n",
+        )
+        .unwrap();
+        fs::set_permissions(&mkcert, fs::Permissions::from_mode(0o755)).unwrap();
+        // Skip trust installation so the test only exercises tool selection.
+        fs::write(directory.path().join("rootCA.pem"), "existing CA").unwrap();
+        let envs = HashMap::from([
+            (
+                "CAROOT".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "DEVENV_MKCERT".to_owned(),
+                mkcert.to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_owned(),
+                directory
+                    .path()
+                    .join("empty-path")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ]);
+        let mut tasks = vec![process_task("web", &[("http", 8080)])];
+        tasks[0].process.as_mut().unwrap().proxy.https.enable = true;
+        let mut routes = project_routes("demo", "test", &mut tasks).unwrap();
+        let error = prepare_https(&mut routes, &mut tasks, &envs, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("configured mkcert invoked"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn https_only_selects_routes_of_opted_in_processes() {
+        let mut tasks = vec![
+            process_task("web", &[("http", 8080)]),
+            process_task_with_hostnames(
+                "api",
+                &[("http", 8081), ("admin", 9000)],
+                Some("api.localhost"),
+                &[("admin", "control.localhost")],
+            ),
+            process_task("worker", &[]),
+        ];
+        tasks[1].process.as_mut().unwrap().proxy.https.enable = true;
+        tasks[2].process.as_mut().unwrap().proxy.https.enable = true;
+        let mut routes = project_routes("demo", "test", &mut tasks).unwrap();
+        // The flag must survive the task configuration passed to the manager.
+        let mut tasks: Vec<tasks::TaskConfig> =
+            serde_json::from_str(&serde_json::to_string(&tasks).unwrap()).unwrap();
+        let selected: std::collections::BTreeSet<_> = https_routes(&mut routes, &tasks)
+            .into_iter()
+            .map(|route| {
+                route.tls = Some(TlsConfig {
+                    certificate: "/work/cert.pem".into(),
+                    key: "/work/key.pem".into(),
+                });
+                route.hostname.clone()
+            })
+            .collect();
+        assert_eq!(
+            selected,
+            ["api.localhost", "http.api.localhost", "control.localhost"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(routes.len(), 4);
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.hostname == "web.demo.localhost")
+        );
+        update_proxy_urls(&routes, &mut tasks);
+        let tasks: Vec<tasks::TaskConfig> =
+            serde_json::from_str(&serde_json::to_string(&tasks).unwrap()).unwrap();
+        let web = &tasks[0].process.as_ref().unwrap().proxy.urls;
+        assert_eq!(web.len(), 1);
+        assert!(web[0].starts_with("http://web.demo.localhost"));
+        let api = &tasks[1].process.as_ref().unwrap().proxy.urls;
+        assert_eq!(api.len(), 3);
+        assert!(api.iter().all(|url| url.starts_with("https://")));
+        assert!(tasks[2].process.as_ref().unwrap().proxy.urls.is_empty());
+    }
 
     #[tokio::test]
     async fn waits_for_previous_proxy_to_release_control_socket() {
@@ -515,6 +891,7 @@ mod tests {
                         hostname: "test.localhost".to_owned(),
                         upstream: "127.0.0.1:8080".parse().unwrap(),
                         owner: "test".to_owned(),
+                        tls: None,
                     }],
                     Some(&frontend),
                 ))

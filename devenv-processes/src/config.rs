@@ -249,6 +249,13 @@ impl Default for StartConfig {
     }
 }
 
+/// Opt-in HTTPS configuration for a process's proxy routes.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProcessProxyHttpsConfig {
+    #[serde(default)]
+    pub enable: bool,
+}
+
 /// Shared HTTP proxy configuration.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProcessProxyConfig {
@@ -258,6 +265,9 @@ pub struct ProcessProxyConfig {
     /// Full `.localhost` hostname overrides keyed by port name.
     #[serde(default)]
     pub port_hostnames: HashMap<String, String>,
+    /// Opt in to HTTPS URLs for this process.
+    #[serde(default)]
+    pub https: ProcessProxyHttpsConfig,
     /// Resolved proxy URLs, populated by the CLI for process display.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,

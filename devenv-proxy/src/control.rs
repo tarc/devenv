@@ -25,6 +25,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
+    Status,
     Register { route: Route },
     Unregister { hostname: String, owner: String },
     ReplaceOwner { owner: String, routes: Vec<Route> },
@@ -34,6 +35,10 @@ pub enum ControlRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlResponse {
+    Info {
+        pid: u32,
+        https_listen: Option<std::net::SocketAddr>,
+    },
     Ok {
         routes: Option<Vec<Route>>,
         removed: Option<bool>,
@@ -161,6 +166,10 @@ fn parse_request(stream: &UnixStream) -> Result<ControlRequest> {
 #[cfg(feature = "server")]
 fn dispatch(request: ControlRequest, routes: &RouteTable) -> Result<ControlResponse> {
     match request {
+        ControlRequest::Status => Ok(ControlResponse::Info {
+            pid: std::process::id(),
+            https_listen: routes.https_listen,
+        }),
         ControlRequest::Register { route } => {
             routes.register(route)?;
             Ok(ControlResponse::Ok {
@@ -206,6 +215,7 @@ mod tests {
             hostname: "web.demo.localhost".to_owned(),
             upstream: SocketAddr::from(([127, 0, 0, 1], 3000)),
             owner: "demo".to_owned(),
+            tls: None,
         };
 
         request(

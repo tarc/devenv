@@ -124,6 +124,7 @@ let
   opensslOverride = attrs: {
     buildInputs = (attrs.buildInputs or [ ]) ++ [ openssl ];
     nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [ pkg-config ];
+    OPENSSL_NO_VENDOR = "1";
   };
 
   # Override for crates needing dbus (Linux only)

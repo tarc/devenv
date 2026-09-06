@@ -897,6 +897,7 @@ impl Devenv {
     async fn reconcile_proxy_routes(
         &self,
         task_configs: &mut [tasks::TaskConfig],
+        envs: &HashMap<String, String>,
         frontend: Option<&tokio::sync::mpsc::Sender<FrontendCommand>>,
     ) -> Result<()> {
         let enabled = self
@@ -924,7 +925,8 @@ impl Devenv {
             .wrap_err("project name is not a string")?;
         let project_name = crate::proxy::project_name(project_name, &self.devenv_root)?;
         let owner = self.proxy_owner();
-        let routes = crate::proxy::project_routes(&project_name, &owner, task_configs)?;
+        let mut routes = crate::proxy::project_routes(&project_name, &owner, task_configs)?;
+        crate::proxy::prepare_https(&mut routes, task_configs, envs, frontend).await?;
         crate::proxy::reconcile(&owner, routes, frontend).await
     }
 
@@ -2625,8 +2627,12 @@ impl Devenv {
         // When enabled, named process ports become friendly localhost URLs.
         // The proxy is shared across projects and starts lazily on the first
         // `devenv up` that has at least one route.
-        self.reconcile_proxy_routes(&mut task_configs, options.frontend_command_tx.as_ref())
-            .await?;
+        self.reconcile_proxy_routes(
+            &mut task_configs,
+            &envs,
+            options.frontend_command_tx.as_ref(),
+        )
+        .await?;
 
         // ── Phase 3: Running processes ──────────────────────────────
         let manager_was_running =

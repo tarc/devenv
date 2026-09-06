@@ -7,6 +7,8 @@ use std::{net::SocketAddr, path::PathBuf};
 struct Args {
     #[arg(long, env = "DEVENV_PROXY_LISTEN", default_value = "127.0.0.1:80")]
     listen: SocketAddr,
+    #[arg(long, env = "DEVENV_PROXY_HTTPS_LISTEN")]
+    https_listen: Option<SocketAddr>,
     #[arg(long, env = "DEVENV_PROXY_SOCKET")]
     control_socket: Option<PathBuf>,
 }
@@ -27,5 +29,8 @@ fn main() -> Result<()> {
         args.listen,
         control_socket.display()
     );
-    devenv_proxy::run(args.listen, &control_socket)
+    if let Some(listen) = args.https_listen {
+        eprintln!("starting devenv proxy TLS on https://{listen}");
+    }
+    devenv_proxy::run_with_https(args.listen, args.https_listen, &control_socket)
 }

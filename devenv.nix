@@ -16,6 +16,7 @@ in
 
     # Use sqlite from nixpkgs to match the version used by Nix
     LIBSQLITE3_SYS_USE_PKG_CONFIG = "1";
+    OPENSSL_NO_VENDOR = "1";
 
     RUST_LOG = "devenv=debug";
     RUST_LOG_SPAN_EVENTS = "full";
